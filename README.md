@@ -56,10 +56,19 @@ Docker 命名卷上）。支持 **一次提交多行签收/退回记录**（每�
 箱号序列字典序最小者**；**无解时明确返回 400 错误，不返回部分方案**（并在仅
 受最大箱数限制时提示放宽到至少几箱即可装载）。未启用时完全保留原规划。
 **容灾评估、延误推演与交接单均沿用该模式及对称化禁配快照**。
+支持 **多站送达分运费分摊**：排程确定后，运营人员按 **仓库→首站、相邻两站**
+的实际行驶顺序逐程填写 **非负整数分运费**（n 站 n 程），系统沿用规划输入快照
+与站点归属、时间窗和站序规则 **重新核对可行路线**；每程只让 **尚未在前站
+卸下的批次** 以 **剩余件数×单件体积** 为权重按 **精确比例** 分担，不足一分
+的尾差用 **最大余数法** 分配（**同余数按批号小者优先**），返回逐程在车批次
+及分摊金额、各批合计与费用总额，**逐程及总额均与输入费用严格相等**；
+费用条数与程数不符、费用非法或排程无解时 **整单拒绝（400），不返回部分分摊**；
+分摊结果在排程结果页查看，规划或排程输入变动后旧结果标记 **已过期**。
 支持在页面上随时修改输入并重新规划。
 
 - 后端：FastAPI（规划算法见 `app/planner.py`；交接台账见 `app/handover.py`，
-  使用 SQLite 持久化，见 `app/db.py`；运输延误推演见 `app/delay.py`）
+  使用 SQLite 持久化，见 `app/db.py`；运输延误推演见 `app/delay.py`；
+  送达站点排程见 `app/delivery.py`；多站送达分运费分摊见 `app/freight.py`）
 - 前端：原生 HTML / CSS / JavaScript（无 CDN 依赖，离线可用）
 - 部署：Docker Compose（数据库初始化与持久化卷已纳入启动）
 
@@ -101,6 +110,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | 容灾评估接口 | `POST http://localhost:8000/api/zone-failure-assessment` |
 | 实测温度复核接口 | `POST http://localhost:8000/api/temperature-review` |
 | 运输延误推演接口 | `POST http://localhost:8000/api/transport-delay` |
+| 送达站点排程接口 | `POST http://localhost:8000/api/delivery-schedule` |
+| 分运费分摊接口 | `POST http://localhost:8000/api/freight-allocation` |
 | 创建交接单 | `POST http://localhost:8000/api/handover-orders` |
 | 交接单列表 / 详情 | `GET http://localhost:8000/api/handover-orders` · `GET /api/handover-orders/{id}` |
 | 提交签收/退回记录 | `POST http://localhost:8000/api/handover-orders/{id}/records` |
@@ -219,7 +230,26 @@ APP_PORT=9000 docker compose up -d --build
      排程区出现 **「已过期」** 标记并禁用搜索,重新生成方案后才可再排程;
      仅修改站点/矩阵/归属等排程输入时,旧结果上方提示 **「排程输入已变化,
      显示的是旧结果,请重新搜索」**。
-10. 结果页底部的 **到货交接台账** 区管理交接单（无需重新生成方案即可查看，
+10. 排程确定后,在结果页 **分运费分摊** 区按 **实际行驶顺序**
+    (仓库→首站、相邻两站)逐程填写 **非负整数分运费**(共 n 站即 n 程),
+    点击 **「💰 分摊分运费」**:
+    - 系统沿用规划输入快照及站点归属、时间窗与站序规则 **重新核对可行
+      路线**(重新穷举最优站序,不信任客户端的任何明细);
+    - 每程只让 **尚未在前站卸下** 的批次分担(归属站未到即在车,含本站
+      将卸的批次),权重为其 **剩余件数 × 单件体积**(剩余件数按快照
+      核对后的规划件数);
+    - 按 **精确比例**(有理数)计算各批份额,先用下取整、再以
+      **最大余数法** 把不足一分的尾差逐分补给分数余数最大的批次,
+      **同余数按批号小者优先**;
+    - 结果给出 **逐程在车批次及分摊金额(分)**(含精确份额与比例分数)、
+      **各批合计** 与 **费用总额**;**逐程合计与各批合计之和均与输入
+      费用严格相等**;
+    - 后续站点均无归属批次的 **空程** 费用必须填 0(否则无批次可分摊,
+      整单拒绝);**费用条数与程数不符、费用非法或排程无解时返回 400,
+      不返回部分分摊**;
+    - 分摊绑定 **规划+排程+费用合并快照**(响应含指纹);规划输入或排程
+      输入变化后旧分摊标记 **已过期**,重新搜索站序后再分摊。
+11. 结果页底部的 **到货交接台账** 区管理交接单（无需重新生成方案即可查看，
    页面打开时自动加载已有交接单，重启后可继续办理）：
    - 生成方案后点击 **「🧾 从当前方案创建交接单」**，系统按当前方案冻结
      各箱各批次的应交件数生成新交接单；此后修改规划输入不影响该单；
@@ -568,6 +598,151 @@ curl -X POST http://localhost:8000/api/delivery-schedule \
 # 400
 {"detail": "不存在可行的站点送达顺序:已穷举 2 种站序,均无法同时满足各站签收时间窗(抵站过早须等待、卸货须在窗口结束前完成)且最后一站卸毕不晚于方案运输总时长 3.0h,不返回部分路线,请放宽时间窗、调整卸货耗时或行车时长后重试"}
 ```
+
+## 九之二、多站送达分运费分摊规则
+
+- 分摊请求体与 `/api/delivery-schedule` **完全相同**,额外携带
+  **逐程分运费** `freight_fees`(非负整数,单位:分),按 **实际行驶
+  顺序** 填写:第 1 程为仓库→首站,其后依次为最优站序中相邻两站;
+  n 个站点即 **n 程**,费用条数必须与程数 **严格相等**;
+- **请求后服务端重新核对路线**:沿用规划输入快照重新规划(仅接受全员
+  可运输方案),并复用站点归属、时间窗与站序规则 **重新穷举最优站序**
+  (最终卸毕最早、并列字典序最小),客户端随附的路线与明细不参与计算;
+  排程无解时返回 400,**不返回部分分摊**;随后再按最优站序程数核对
+  费用条数与取值;
+- **费用校验**(非法返回 400,消息可直接展示):
+  - 必须为列表且条数 = 站点数(程数);
+  - 每条必须是 **非负整数**(布尔、浮点如 `1.0`、数字字符串、负数
+    一律拒绝);
+- **在车批次**:第 k 程承担费用的批次,是其归属站在最优站序中的位置
+  **不早于第 k 站** 的全部批次——即尚未在前站卸下者(本程运抵并将在
+  本站卸下的批次仍参与本程);批次卸毕后的后续程不再分担;
+- **权重与精确比例**:
+  - 权重 = 该批 **剩余件数 × 单件体积**;剩余件数取自快照重新核对后的
+    规划件数(同批拆多箱时合并),单件体积取自规划输入;
+  - 全部计算使用 **精确有理数**(`fractions.Fraction`,由输入小数的
+    十进制字符串构造),不存在浮点误差;
+- **最大余数法(Hamilton / Largest Remainder)**:
+  - 每批精确份额 = 该程费用 × 该批权重 / 本程总权重;
+  - 先各取份额 **下取整**,剩余的每 1 分按 **分数余数从大到小** 逐分
+    补给,直到分完;**分数余数相等时批号小者优先**;
+  - 因此每程各批分摊金额为非负整数且 **合计严格等于该程输入费用**;
+- **空程**:某程行驶时车上已无任何批次(后续站点均无归属批次),该程
+  费用必须为 **0**(返回空分摊,合计仍为 0);填正数时无批次可分担,
+  返回 400;
+- **合计与总额**:响应给出各批跨程合计,其总和 **严格等于** 全程费用
+  总额;任何守恒校验失败都不会返回结果;
+- 响应携带三组指纹:`plan_fingerprint`(仅规划输入)、
+  `schedule_fingerprint`(规划+排程输入,即排程接口的
+  `input_fingerprint`)与 `input_fingerprint`(规划+排程+**费用**
+  合并指纹);前端据此在规划输入或排程输入变化后将旧分摊标记为
+  **已过期**,重新搜索站序后再分摊。
+
+### 分运费分摊接口示例
+
+```bash
+# 与送达排程同一请求体,额外带 freight_fees(2 站即 2 程:仓库→东城站、东城站→西城站)
+curl -X POST http://localhost:8000/api/freight-allocation \
+  -H "Content-Type: application/json" \
+  -d '{
+    "plan_input": {
+      "transport_hours": 12, "box_capacity": 100,
+      "zones": [{"name": "冷藏区", "t_min": 0, "t_max": 8}],
+      "cargoes": [
+        {"name": "鲜奶", "units": 40, "unit_volume": 0.25, "t_min": 2, "t_max": 6},
+        {"name": "三文鱼", "units": 10, "unit_volume": 0.4, "t_min": -2, "t_max": 2}
+      ]
+    },
+    "stations": [
+      {"name": "东城站", "window_start": 2, "window_end": 8,
+       "unload_hours": 1, "from_warehouse": 2},
+      {"name": "西城站", "window_start": 3, "window_end": 12,
+       "unload_hours": 1, "from_warehouse": 3}
+    ],
+    "travel": [[0, 2], [2, 0]],
+    "assignments": [1, 2],
+    "freight_fees": [100, 33]
+  }'
+```
+
+第 1 程两批同在车,权重 = 40×0.25 : 10×0.4 = 10 : 4,100 分的精确份额
+为 500/7(71.428…)与 200/7(28.571…),下取整 71/28 后余 1 分补给
+余数较大的三文鱼 → 71 / 29;第 2 程鲜奶已在东城站卸下,仅三文鱼承担
+全额 33 分。响应(节选):
+
+```json
+{
+  "input_fingerprint": "…",
+  "schedule_fingerprint": "…",
+  "plan_fingerprint": "…",
+  "optimal_order": [1, 2],
+  "currency": "CNY-cent",
+  "leg_count": 2,
+  "legs": [
+    {"leg_no": 1, "from": "仓库", "from_station_no": null,
+     "to": "站点 1", "to_station_no": 1, "station_name": "东城站",
+     "drive_hours": 2.0, "freight_cents": 100, "onboard_batch_count": 2,
+     "allocated_total_cents": 100,
+     "allocations": [
+       {"batch_no": 1, "name": "鲜奶", "remaining_units": 40,
+        "unit_volume": 0.25, "weight": "10/1", "share_ratio": "5/7",
+        "exact_share": "500/7", "exact_share_decimal": 71.428571,
+        "amount_cents": 71},
+       {"batch_no": 2, "name": "三文鱼", "remaining_units": 10,
+        "unit_volume": 0.4, "weight": "4/1", "share_ratio": "2/7",
+        "exact_share": "200/7", "exact_share_decimal": 28.571429,
+        "amount_cents": 29}
+     ]},
+    {"leg_no": 2, "from": "站点 1", "from_station_no": 1,
+     "to": "站点 2", "to_station_no": 2, "station_name": "西城站",
+     "drive_hours": 2.0, "freight_cents": 33, "onboard_batch_count": 1,
+     "allocated_total_cents": 33,
+     "allocations": [
+       {"batch_no": 2, "name": "三文鱼", "remaining_units": 10,
+        "unit_volume": 0.4, "weight": "4/1", "share_ratio": "1/1",
+        "exact_share": "33/1", "exact_share_decimal": 33.0,
+        "amount_cents": 33}
+     ]}
+  ],
+  "batch_totals": [
+    {"batch_no": 1, "name": "鲜奶", "units": 40, "unit_volume": 0.25,
+     "station_no": 1, "total_cents": 71},
+    {"batch_no": 2, "name": "三文鱼", "units": 10, "unit_volume": 0.4,
+     "station_no": 2, "total_cents": 62}
+  ],
+  "total_freight_cents": 133,
+  "batch_total_sum_cents": 133,
+  "feasible": true,
+  "verdict": "按最优站序 1 → 2 共 2 程完成运费分摊:全程运费合计 133 分,……逐程及总额均与输入费用严格相等"
+}
+```
+
+拒绝场景(均为 400,不返回部分分摊):
+
+```bash
+# 费用条数与程数不符(2 站须 2 条)
+# → {"detail": "运费条数 1 与站序程数 2 不符:当前最优站序共 2 程(仓库→首站及相邻两站),请按实际行驶顺序逐程填写费用"}
+
+# 费用非法(浮点/负数/布尔)
+# freight_fees: [100, 1.0] → {"detail": "第 2 程分运费须为非负整数(单位:分),实际为 1.0,已拒绝"}
+
+# 空程却填正费用(该程无在车批次)
+# → {"detail": "第 2 程行驶时车上已无任何批次(后续站点均无归属批次),该程费用 5 分无处分摊,请改为 0 分或调整批次归属后重试"}
+
+# 排程无解
+# → {"detail": "不存在可行的站点送达顺序:……不返回部分路线,请放宽时间窗、调整卸货耗时或行车时长后重试"}
+```
+
+### 分运费分摊响应字段
+
+| 字段 | 说明 |
+| --- | --- |
+| `legs[]` | 按最优站序逐程(共 n 程):`leg_no`、`from`/`from_station_no`(第 1 程为「仓库」)、`to`/`to_station_no`/`station_name`、`drive_hours`、`freight_cents`(输入费用)、`onboard_batch_count`、`allocated_total_cents`(分摊合计,与输入严格相等) |
+| `legs[].allocations[]` | 该程在车批次分摊:`batch_no`/`name`、`remaining_units`(在车剩余件数)、`unit_volume`、`weight`/`weight_decimal`(件数×体积权重,精确分数)、`share_ratio`(精确比例分数)、`exact_share`/`exact_share_decimal`(精确份额)、`amount_cents`(整数分摊金额) |
+| `batch_totals[]` | 各批跨程合计:`batch_no`/`name`、`units`(方案件数)、`unit_volume`、`station_no`(送达站)、`total_cents` |
+| `total_freight_cents` / `batch_total_sum_cents` | 全程费用总额 / 各批合计之和(二者严格相等) |
+| `stops` / `stations` / `optimal_order` / `orders_evaluated` 等 | 服务端重新核对得到的排程结果(字段含义同送达排程接口) |
+| `input_fingerprint` / `schedule_fingerprint` / `plan_fingerprint` | 规划+排程+费用合并指纹 / 规划+排程指纹 / 仅规划输入指纹(SHA-256);任一输入变化后前端据此将旧分摊标记为已过期 |
 
 ### 送达站点排程响应字段
 
@@ -1090,6 +1265,7 @@ curl -X POST http://localhost:8000/api/temperature-review \
 │   ├── review.py      # 实测温度复核(CSV 校验、仪器误差带、确定/可能超界切段、度时上下界积分)
 │   ├── delay.py       # 运输延误推演(段时长增加后重算逐段设定点与各批累计度时,逐箱对比)
 │   ├── delivery.py    # 送达站点排程(快照核对箱号/批次/件数,穷举站序,最早卸毕+字典序)
+│   ├── freight.py     # 多站送达分运费分摊(在车批次按剩余件数×体积精确比例,最大余数法,同余数批号小者优先)
 │   ├── handover.py    # 到货交接台账(交接单冻结、多行签收/退回整笔入账、撤销重放校验)
 │   ├── db.py          # SQLite 连接与建表(WAL、外键、显式事务)
 │   └── schemas.py     # 请求模型
@@ -1101,6 +1277,7 @@ curl -X POST http://localhost:8000/api/temperature-review \
 │   ├── test_handover.py  # 台账 API 测试(python tests/test_handover.py)
 │   ├── test_delay.py     # 延误推演测试(python tests/test_delay.py)
 │   ├── test_delivery.py  # 送达站点排程测试(python tests/test_delivery.py)
+│   ├── test_freight.py   # 分运费分摊测试(python tests/test_freight.py)
 │   └── test_forbidden.py
 ├── Dockerfile
 ├── docker-compose.yml # 含 SQLite 初始化与 handover-data 持久化卷

@@ -259,6 +259,18 @@ def _build_stops(
 
 def schedule_delivery(payload: dict[str, Any]) -> dict[str, Any]:
     """送达站点排程入口;输入不合法或无可行站序时抛 ScheduleError。"""
+    result = _solve_delivery(payload)
+    return result["response"]
+
+
+def _solve_delivery(payload: dict[str, Any]) -> dict[str, Any]:
+    """排程核心求解:重新规划核对快照、穷举最优站序。
+
+    返回内部结构(供排程响应与运费分摊复用):
+    ``plan_input`` / ``stations`` / ``travel`` / ``assignments``(规范化后的
+    排程输入)、``batch_meta``(每批 name/件数/单件体积)、``optimal_order``
+    (0 起下标)、``stops``(最优站序逐站时刻+送达明细)及排程响应 ``response``。
+    """
     plan_input = payload.get("plan_input")
     if not isinstance(plan_input, dict):
         raise ScheduleError("缺少生成方案时的输入快照 plan_input")
@@ -374,17 +386,17 @@ def schedule_delivery(payload: dict[str, Any]) -> dict[str, Any]:
     order_text = " → ".join(
         f"{no}({stations[no - 1]['name']})" for no in order_nos
     )
-    fp_payload = {"plan_input": plan_input, "delivery": _fingerprint_payload(
-        stations, travel, assignments
-    )}
+    delivery_fp_payload = _fingerprint_payload(stations, travel, assignments)
     verdict = (
         f"最优站序 {order_text},共搜索 {evaluated} 种站序、"
         f"{feasible_count} 种可行;最后一站于第 {_r(final_finish)}h 卸毕"
         f"(方案运输总时长 {_r(total_hours)}h,余量 "
         f"{_r(total_hours - final_finish)}h)"
     )
-    return {
-        "input_fingerprint": input_fingerprint(fp_payload),
+    response = {
+        "input_fingerprint": input_fingerprint(
+            {"plan_input": plan_input, "delivery": delivery_fp_payload}
+        ),
         "plan_fingerprint": input_fingerprint(plan_input),
         "forbidden_mode": bool(summary.get("forbidden_mode")),
         "transport_total_hours": _r(total_hours),
@@ -411,6 +423,28 @@ def schedule_delivery(payload: dict[str, Any]) -> dict[str, Any]:
         ],
         "feasible": True,
         "verdict": verdict,
+    }
+    # 每批快照信息(运费分摊按「剩余件数 × 单件体积」加权时复用)
+    batch_meta: dict[int, dict[str, Any]] = {}
+    for i, c in enumerate(cargo_rows):
+        bno = i + 1
+        batch_meta[bno] = {
+            "batch_no": bno,
+            "name": batch_names.get(bno, f"批次 {bno}"),
+            "units": int(c.get("units")),
+            "unit_volume": float(c.get("unit_volume")),
+            "station_idx": assignments[bno],
+        }
+    return {
+        "plan_input": plan_input,
+        "stations": stations,
+        "travel": travel,
+        "assignments": assignments,
+        "delivery_fp_payload": delivery_fp_payload,
+        "batch_meta": batch_meta,
+        "optimal_order": list(best_order),
+        "stops": stops,
+        "response": response,
     }
 
 

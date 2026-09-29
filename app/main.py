@@ -9,13 +9,14 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import db, delay, delivery, handover
+from . import db, delay, delivery, freight, handover
 from .planner import plan
 from .resilience import assess_zone_failures
 from .review import review
 from .schemas import (
     DelayRequest,
     DeliveryScheduleRequest,
+    FreightAllocationRequest,
     HandoverOrderCreate,
     HandoverRecordsSubmit,
     PlanRequest,
@@ -55,8 +56,12 @@ app = FastAPI(
     "填写各站签收时间窗、卸货耗时及仓库/站点间有向行车时长,按快照重新核对"
     "箱号/批次/件数,穷举全部可行站序(抵站过早等待、卸货须在窗口结束前完成、"
     "末站卸毕不超过方案运输总时长),取最终卸毕最早、并列时站序号字典序最小者,"
-    "无可行站序返回 400 不返回部分路线",
-    version="1.10.0",
+    "无可行站序返回 400 不返回部分路线;"
+    "以及多站送达分运费分摊:按实际行驶顺序逐程填写非负整数分运费(条数与程数一致),"
+    "沿用快照与站点/时间窗/站序规则重新核对可行路线,每程仅由尚未在前站卸下的"
+    "批次按剩余件数×单件体积精确比例分摊,不足一分用最大余数法分配(同余数批号小者优先),"
+    "逐程及总额严格等于输入费用,费用非法或排程无解返回 400 不返回部分分摊",
+    version="1.11.0",
     lifespan=lifespan,
 )
 
@@ -151,6 +156,18 @@ async def api_delivery_schedule(req: DeliveryScheduleRequest) -> dict:
     序号组成的站序字典序最小者;无可行站序返回 400,不返回部分路线。
     输入变化后旧排程结果过期,需重新生成方案。"""
     return delivery.schedule_delivery(req.model_dump())
+
+
+@app.post("/api/freight-allocation", tags=["delivery"])
+async def api_freight_allocation(req: FreightAllocationRequest) -> dict:
+    """多站送达分运费分摊:请求体与 /api/delivery-schedule 相同,额外携带按
+    实际行驶顺序(仓库→首站、相邻两站)逐程填写的非负整数分运费
+    freight_fees(条数须与站序程数相等)。服务端沿用规划输入快照与站点
+    归属、时间窗和站序规则重新核对可行路线,每程仅由尚未在前站卸下的
+    批次按剩余件数×单件体积精确比例分摊,不足一分用最大余数法分配
+    (同余数批号小者优先);逐程与总额均严格等于输入费用,否则整单
+    拒绝(400)不返回部分分摊。输入变化后旧分摊结果过期。"""
+    return freight.allocate_freight(req.model_dump())
 
 
 # ---------------- 到货交接台账 ----------------

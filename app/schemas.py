@@ -225,6 +225,17 @@ class DeliveryScheduleRequest(BaseModel):
         return v
 
 
+class FreightAllocationRequest(DeliveryScheduleRequest):
+    # 不在 Pydantic 层做类型转换(如 1.0 会被宽松转成 1):逐程费用的
+    # 条数、非负整数(拒绝布尔/浮点)校验全部由业务层完成,非法统一返回 400。
+    freight_fees: list = Field(
+        ...,
+        description="逐程分运费(非负整数,单位:分),按实际行驶顺序填写:"
+        "仓库→首站、其后相邻两站,共 站点数 条(与最优站序程数一致);"
+        "条数不符或含非整数/负数时整单拒绝(400),不返回部分分摊",
+    )
+
+
 class HandoverOrderCreate(BaseModel):
     plan_input: PlanRequest = Field(
         ...,
