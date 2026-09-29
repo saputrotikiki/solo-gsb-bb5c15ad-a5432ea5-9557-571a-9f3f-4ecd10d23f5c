@@ -259,6 +259,31 @@ def _build_stops(
 
 def schedule_delivery(payload: dict[str, Any]) -> dict[str, Any]:
     """送达站点排程入口;输入不合法或无可行站序时抛 ScheduleError。"""
+    plan_input, stations, travel, assignments, baseline, batch_names, station_items = (
+        compute_schedule_basis(payload)
+    )
+    return _build_schedule_response(
+        plan_input, stations, travel, assignments,
+        baseline, batch_names, station_items,
+    )
+
+
+def compute_schedule_basis(payload: dict[str, Any]) -> tuple[
+    dict[str, Any],
+    list[dict[str, Any]],
+    list[list[float]],
+    dict[int, int],
+    dict[str, Any],
+    dict[int, str],
+    dict[int, list[dict[str, Any]]],
+]:
+    """按快照重新规划并核对全部排程输入,返回排程所需的规范化结构。
+
+    复用同一套站点归属、时间窗与站序可行性校验:任一不满足抛 ScheduleError,
+    调用方(运费分摊)据此保证「排程无解时拒绝,不返回部分结果」。
+    返回:plan_input、站点列表、行车矩阵、{批号: 站序号(0 起)}、
+    重新规划方案、{批号: 批次名}、{站序号: 送达明细列表(已排序)}。
+    """
     plan_input = payload.get("plan_input")
     if not isinstance(plan_input, dict):
         raise ScheduleError("缺少生成方案时的输入快照 plan_input")
@@ -271,7 +296,6 @@ def schedule_delivery(payload: dict[str, Any]) -> dict[str, Any]:
     summary = baseline["summary"]
     cargo_rows = plan_input.get("cargoes") or []
     batch_count = len(cargo_rows)
-    total_hours = float(summary["transport_hours"])
 
     if not boxes or not summary.get("all_loaded") or not summary.get(
         "all_transportable"
@@ -301,10 +325,13 @@ def schedule_delivery(payload: dict[str, Any]) -> dict[str, Any]:
         )
 
     # 箱号/批次/件数核对:按重新规划结果汇总每站应送达的明细(按箱号、批号排序)
-    batch_names = {i + 1: str(c.get("name") or f"批次 {i + 1}") for i, c in enumerate(cargo_rows)}
-    station_items: dict[int, list[dict[str, Any]]] = {i: [] for i in range(len(stations))}
-    station_boxes: dict[int, list[int]] = {i: [] for i in range(len(stations))}
-    station_units: dict[int, int] = {i: 0 for i in range(len(stations))}
+    batch_names = {
+        i + 1: str(c.get("name") or f"批次 {i + 1}")
+        for i, c in enumerate(cargo_rows)
+    }
+    station_items: dict[int, list[dict[str, Any]]] = {
+        i: [] for i in range(len(stations))
+    }
     for box in boxes:
         box_no = int(box["box_no"])
         merged: dict[int, int] = {}
@@ -321,11 +348,35 @@ def schedule_delivery(payload: dict[str, Any]) -> dict[str, Any]:
                     "units": units,
                 }
             )
-            if box_no not in station_boxes[sidx]:
-                station_boxes[sidx].append(box_no)
-            station_units[sidx] += units
-    for sidx, items in station_items.items():
+    for items in station_items.values():
         items.sort(key=lambda x: (x["box_no"], x["batch_no"]))
+
+    return (
+        plan_input, stations, travel, assignments,
+        baseline, batch_names, station_items,
+    )
+
+
+def _build_schedule_response(
+    plan_input: dict[str, Any],
+    stations: list[dict[str, Any]],
+    travel: list[list[float]],
+    assignments: dict[int, int],
+    baseline: dict[str, Any],
+    batch_names: dict[int, str],
+    station_items: dict[int, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """在已核对的排程输入上穷举站序并构建响应(无可行站序时抛 ScheduleError)。"""
+    summary = baseline["summary"]
+    total_hours = float(summary["transport_hours"])
+
+    station_boxes: dict[int, list[int]] = {i: [] for i in range(len(stations))}
+    station_units: dict[int, int] = {i: 0 for i in range(len(stations))}
+    for sidx, items in station_items.items():
+        for it in items:
+            if it["box_no"] not in station_boxes[sidx]:
+                station_boxes[sidx].append(it["box_no"])
+            station_units[sidx] += it["units"]
 
     # 穷举全部站序:最早末站卸毕优先,并列取站序号字典序最小
     n = len(stations)

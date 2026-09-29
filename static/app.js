@@ -517,6 +517,12 @@ async function runPlan() {
       deliveryResultFingerprint = null;
       deliveryAssign = {};
       $("deliveryResult").innerHTML = "";
+      /* 旧分摊随之作废:隐藏费用录入,清空分摊结果 */
+      freightRequest = null;
+      deliveryScheduleData = null;
+      freightResultFingerprint = null;
+      $("freightPanel").hidden = true;
+      $("freightResult").innerHTML = "";
     }
     planSnapshot = newSnapshot;
     planData = data;
@@ -1801,6 +1807,173 @@ function markDeliveryResultEdited() {
   $("deliveryStale").hidden = false;
   $("deliveryStale").textContent = "⚠ 排程输入已变化,显示的是旧结果,请重新搜索";
   deliveryResultFingerprint = null;
+  markFreightStale("⚠ 排程输入已变化,分摊结果已过期,请重新搜索排程后再分摊");
+}
+
+/* ---------------- 多站送达分运费分摊 ---------------- */
+let freightRequest = null; // 最近一次排程请求体(快照/站点/矩阵/归属),分摊时原样带上
+let deliveryScheduleData = null; // 最近一次排程结果(站序/逐站时刻)
+let freightFees = []; // 按最优站序逐程的费用字符串(空串待填)
+let freightResultFingerprint = null; // 最近一次分摊结果指纹(用于费用变更标过期)
+
+function renderFreightPanel(data) {
+  deliveryScheduleData = data;
+  freightFees = data.optimal_order.map(() => "");
+  freightResultFingerprint = null;
+  $("freightPanel").hidden = false;
+  $("freightStale").hidden = true;
+  $("freightResult").innerHTML = "";
+  $("freightError").hidden = true;
+  const tbody = $("freightFeeRows");
+  tbody.innerHTML = "";
+  data.stops.forEach((s, i) => {
+    const fromText = i === 0
+      ? "仓库"
+      : `站点 ${data.stops[i - 1].station_no}「${escapeHtml(data.stops[i - 1].name)}」`;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><strong>第 ${s.seq} 程</strong></td>
+      <td>${fromText} → 站点 ${s.station_no}「${escapeHtml(s.name)}」
+        <small class="muted">行车 ${fmt(s.drive_hours)}h</small></td>
+      <td class="muted">[${fmt(s.window_start)}, ${fmt(s.window_end)}]h</td>
+      <td><input data-fee="${i}" type="number" min="0" step="1" inputmode="numeric"
+            value="" placeholder="如 1000" /></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+$("freightFeeRows").addEventListener("input", (e) => {
+  const idx = e.target.dataset.fee;
+  if (idx === undefined) return;
+  freightFees[Number(idx)] = e.target.value;
+  if (freightResultFingerprint === null) return;
+  freightResultFingerprint = null;
+  $("freightStale").hidden = false;
+  $("freightStale").textContent = "⚠ 费用已变化,显示的是旧分摊,请重新分摊";
+});
+
+function collectFreightFees() {
+  const fees = [];
+  for (let i = 0; i < freightFees.length; i++) {
+    const raw = String(freightFees[i] ?? "").trim();
+    if (!/^\d+$/.test(raw)) {
+      throw new Error(`第 ${i + 1} 程分运费须为非负整数(单位:分),请填写 0 或正整数`);
+    }
+    fees.push(Number(raw));
+  }
+  return fees;
+}
+
+function showFreightError(msg) {
+  $("freightError").hidden = false;
+  $("freightError").textContent = "⚠ " + msg;
+}
+
+async function runFreight() {
+  $("freightError").hidden = true;
+  if (!freightRequest || !deliveryScheduleData) {
+    showFreightError("请先搜索并确定送达排程");
+    return;
+  }
+  let fees;
+  try {
+    fees = collectFreightFees();
+  } catch (e) {
+    showFreightError(e.message);
+    return;
+  }
+  const btn = $("btnFreight");
+  btn.disabled = true;
+  btn.textContent = "分摊中…";
+  try {
+    const resp = await fetch("/api/freight-allocation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...freightRequest, fees }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `分摊失败(HTTP ${resp.status})`);
+    freightResultFingerprint = data.input_fingerprint;
+    $("freightStale").hidden = true;
+    renderFreightResult(data);
+  } catch (e) {
+    showFreightError(e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "💰 分摊运费";
+  }
+}
+
+function fmtCents(c) {
+  return `${Number(c).toLocaleString("zh-CN")} 分`;
+}
+
+function renderFreightResult(data) {
+  const legs = data.legs.map((leg) => {
+    const rows = leg.onboard.map((o) => `
+      <tr>
+        <td>#${o.batch_no} ${escapeHtml(o.name)}</td>
+        <td class="num">${fmt(o.remaining_units)} 件</td>
+        <td class="num">${fmt(o.unit_volume)}</td>
+        <td class="num">${fmt(o.weight)}</td>
+        <td class="num muted">${o.exact_share_numerator}/${o.exact_share_denominator}</td>
+        <td class="num">${fmtCents(o.allocated_cents)}</td>
+      </tr>`).join("")
+      || '<tr><td colspan="6" class="muted">本程无在车批次(费用 0 分)</td></tr>';
+    const balanced = leg.allocated_total_cents === leg.fee_cents;
+    return `<div class="delivery-stop">
+      <div class="stop-head">
+        <span class="badge badge-ok">第 ${leg.seq} 程</span>
+        <strong>${escapeHtml(leg.from)} → 站点 ${leg.station_no}「${escapeHtml(leg.name)}」</strong>
+        <span class="assess-chip">在车 ${leg.onboard_count} 批</span>
+        <span class="assess-chip">本程费用 <strong>${fmtCents(leg.fee_cents)}</strong></span>
+        <span class="assess-chip ${balanced ? "chip-ok" : "chip-forbidden"}">
+          分摊合计 ${fmtCents(leg.allocated_total_cents)}${balanced ? " ✓ 与本程费用相等" : " ✗"}
+        </span>
+      </div>
+      <table class="seg-checks">
+        <thead><tr><th>在车批次</th><th class="num">剩余件数</th><th class="num">单件体积</th>
+          <th class="num">权重=件数×体积</th><th class="num">精确份额(分)</th><th class="num">分摊金额</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  }).join("");
+
+  const batchRows = data.batch_totals.map((b) => `
+    <tr>
+      <td>#${b.batch_no} ${escapeHtml(b.name)}</td>
+      <td class="num">${fmt(b.total_units)} 件</td>
+      <td>站点 ${b.station_no}「${escapeHtml(b.station_name)}」</td>
+      <td class="num"><strong>${fmtCents(b.total_allocated_cents)}</strong></td>
+    </tr>`).join("");
+
+  $("freightResult").innerHTML = `
+    <div class="assess-meta">
+      <span class="assess-chip">最优站序 <strong>${data.optimal_order.join(" → ")}</strong></span>
+      <span class="assess-chip">共 ${data.leg_count} 程</span>
+      <span class="assess-chip">费用总额 <strong>${fmtCents(data.total_fee_cents)}</strong></span>
+      <span class="assess-chip ${data.balanced ? "chip-ok" : "chip-forbidden"}">
+        分摊总额 ${fmtCents(data.allocated_total_cents)}${data.balanced ? " ✓ 与总额严格相等" : " ✗"}
+      </span>
+      <span class="assess-chip muted">快照 ${data.input_fingerprint.slice(0, 8)}</span>
+    </div>
+    <div class="delay-verdict delay-ok">✓ ${escapeHtml(data.verdict)}</div>
+    <div class="detail-sub">逐程在车批次及分摊金额(精确比例 + 最大余数法,同余数批号小者优先)</div>
+    ${legs}
+    <div class="detail-sub">各批合计</div>
+    <table class="seg-checks">
+      <thead><tr><th>批次</th><th class="num">件数</th><th>送达站</th><th class="num">合计分摊(分)</th></tr></thead>
+      <tbody>${batchRows}</tbody>
+    </table>`;
+}
+
+$("btnFreight").addEventListener("click", runFreight);
+
+/* 规划/排程输入变化后旧分摊标记过期并隐藏录入面板(重新排程后再出现) */
+function markFreightStale(msg) {
+  if ($("freightPanel").hidden) return;
+  $("freightStale").hidden = false;
+  $("freightStale").textContent = msg;
 }
 
 function collectDeliveryInput() {
@@ -1857,21 +2030,25 @@ async function runDelivery() {
   btn.disabled = true;
   btn.textContent = "搜索中…";
   try {
+    const body = JSON.stringify({
+      plan_input: JSON.parse(planSnapshot),
+      stations: input.stations,
+      travel: input.travel,
+      assignments: input.assignments,
+    });
     const resp = await fetch("/api/delivery-schedule", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        plan_input: JSON.parse(planSnapshot),
-        stations: input.stations,
-        travel: input.travel,
-        assignments: input.assignments,
-      }),
+      body,
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || `排程失败（HTTP ${resp.status}）`);
     deliverySnapshot = planSnapshot;
     deliveryResultFingerprint = data.input_fingerprint;
     renderDelivery(data);
+    // 排程确定:固化本次排程请求体并按最优站序渲染逐程费用录入行
+    freightRequest = JSON.parse(body);
+    renderFreightPanel(data);
   } catch (e) {
     showDeliveryError(e.message);
   } finally {
@@ -1957,6 +2134,13 @@ function markDeliveryStale() {
   if (stale) {
     $("deliveryStale").hidden = false;
     $("deliveryStale").textContent = "⚠ 输入已变化,排程结果已过期,请重新生成方案";
+    // 规划输入变化:旧分摊结果同样过期,费用录入禁用,待重新排程后恢复
+    markFreightStale("⚠ 输入已变化,分摊结果已过期,请重新生成方案并重新排程");
+    $("btnFreight").disabled = true;
+    $("freightFeeRows").querySelectorAll("input").forEach((el) => { el.disabled = true; });
+  } else {
+    $("btnFreight").disabled = false;
+    $("freightFeeRows").querySelectorAll("input").forEach((el) => { el.disabled = false; });
   }
   $("btnDelivery").disabled = stale;
   $("btnAddStation").disabled = stale;

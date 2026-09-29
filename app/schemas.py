@@ -225,6 +225,21 @@ class DeliveryScheduleRequest(BaseModel):
         return v
 
 
+class FreightAllocateRequest(DeliveryScheduleRequest):
+    """分运费分摊请求:在送达排程输入(快照/站点/矩阵/归属)之外,再按实际
+    行驶顺序逐程填写非负整数分运费;条数与合法性由业务层核对
+    (须与站数一致且全部非负整数),非法返回 400,不返回部分分摊。"""
+
+    fees: list = Field(
+        ...,
+        description="逐程分运费(非负整数,单位:分),按实际行驶顺序填写:"
+        "第 1 条为仓库→首站,其后为相邻两站各一程;条数必须与站点数一致。"
+        "每程只由尚未在前站卸下的批次按剩余件数×单件体积的权重精确比例分摊,"
+        "尾差用最大余数法(同余数批号小者优先)。服务端按快照重新核对可行路线,"
+        "排程无解、条数不符或费用非法时整笔拒绝",
+    )
+
+
 class HandoverOrderCreate(BaseModel):
     plan_input: PlanRequest = Field(
         ...,

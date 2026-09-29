@@ -207,6 +207,24 @@
           <button id="btnDelivery" type="button" class="btn btn-small btn-submit-records">🚚 搜索最优站序</button>
           <div id="deliveryResult"></div>
           <div id="deliveryError" class="error-box" hidden></div>
+
+          <div id="freightPanel" hidden>
+            <h4 class="handover-sub">逐程分运费分摊
+              <small class="muted">排程确定后,按实际行驶顺序(仓库→首站、相邻两站)逐程填写非负整数分运费</small>
+              <span id="freightStale" class="stale-badge" hidden>⚠ 输入或费用已变化,分摊结果已过期,请重新分摊</span>
+            </h4>
+            <div class="table-wrap">
+              <table class="editable delivery-edit">
+                <thead>
+                  <tr><th>程序</th><th>行驶区间</th><th>到站时间窗</th><th>分运费(分)</th></tr>
+                </thead>
+                <tbody id="freightFeeRows"></tbody>
+              </table>
+            </div>
+            <button id="btnFreight" type="button" class="btn btn-small btn-submit-records">💰 分摊运费</button>
+            <div id="freightResult"></div>
+            <div id="freightError" class="error-box" hidden></div>
+          </div>
         </div>
       </div>
 
